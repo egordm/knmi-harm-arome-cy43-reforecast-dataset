@@ -125,11 +125,12 @@ async def process_pipeline(
     output_dir: Path = Path("../data/processed"),
     max_concurrent: int = 10,
     s3_bucket: str | None = None,
+    queue_file: Path = SCRIPTS_PATH / "file_queue.json",
 ) -> None:
     """Main processing pipeline with concurrency control"""
     # Load configuration
 
-    file_queue = pd.read_json(SCRIPTS_PATH / "file_queue.json").to_dict("records")
+    file_queue = pd.read_json(queue_file).to_dict("records")
     locations_filter = pd.read_csv(SCRIPTS_PATH / "selected_locations.csv")["location_idx"].values
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +169,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--s3_bucket", type=str, default=None)
     parser.add_argument("-j", "--max_concurrent", type=int, default=1)
+    parser.add_argument("--queue_file", type=Path, default=SCRIPTS_PATH / "file_queue.json")
 
     args = parser.parse_args()
 
@@ -179,5 +181,6 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             max_concurrent=args.max_concurrent,
             s3_bucket=args.s3_bucket,
+            queue_file=args.queue_file,
         )
     )
