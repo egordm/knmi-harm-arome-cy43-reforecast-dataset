@@ -109,6 +109,8 @@ async def process_single_file(
                 await asyncio.get_event_loop().run_in_executor(
                     pool, shutil.rmtree, unzip_dir
                 )
+            if s3_bucket:
+                parquet_path.unlink(missing_ok=True)
 
 
 def extract_zip(zip_path: Path, output_dir: Path) -> None:
