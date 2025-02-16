@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import asyncio
 import zipfile
@@ -43,6 +44,7 @@ async def process_single_file(
     dataset_version: str,
     output_dir: Path,
     locations_filter: List[int],
+    cpu_executor: ThreadPoolExecutor,
     s3_bucket: str = None,
 ) -> None:
     """Process a single file through the entire pipeline with cleanup"""
@@ -68,23 +70,20 @@ async def process_single_file(
 
         # 2. Unzip using thread pool
         unzip_dir = output_dir / "unzipped" / zip_path.stem
-        with ThreadPoolExecutor() as pool:
-            await asyncio.get_event_loop().run_in_executor(
-                pool, lambda: extract_zip(zip_path, unzip_dir)
-            )
+        await asyncio.get_event_loop().run_in_executor(
+            cpu_executor, lambda: extract_zip(zip_path, unzip_dir)
+        )
 
         # 3. Process GRIB files
         grib_files = sorted(unzip_dir.glob("*_GB"))
-        with ThreadPoolExecutor() as pool:
-            df = await asyncio.get_event_loop().run_in_executor(
-                pool, lambda: grib_files_to_dataframe(grib_files, locations_filter)
-            )
+        df = await asyncio.get_event_loop().run_in_executor(
+            cpu_executor, lambda: grib_files_to_dataframe(grib_files, locations_filter)
+        )
 
         # 4. Save as Parquet
-        with ThreadPoolExecutor() as pool:
-            await asyncio.get_event_loop().run_in_executor(
-                pool, lambda: df.to_parquet(parquet_path)
-            )
+        await asyncio.get_event_loop().run_in_executor(
+            cpu_executor, lambda: df.to_parquet(parquet_path)
+        )
 
         # 5. S3 Upload (async)
         if s3_bucket:
@@ -100,17 +99,16 @@ async def process_single_file(
         logger.error(f"Failed processing {file_info['filename']}: {e}")
     finally:
         # Cleanup temporary files
-        with ThreadPoolExecutor() as pool:
-            # Delete zip file
-            if zip_path and zip_path.exists():
-                await asyncio.get_event_loop().run_in_executor(pool, zip_path.unlink)
-            # Delete unzipped directory
-            if unzip_dir and unzip_dir.exists():
-                await asyncio.get_event_loop().run_in_executor(
-                    pool, shutil.rmtree, unzip_dir
-                )
-            if s3_bucket:
-                parquet_path.unlink(missing_ok=True)
+        # Delete zip file
+        if zip_path and zip_path.exists():
+            await asyncio.get_event_loop().run_in_executor(cpu_executor, zip_path.unlink)
+        # Delete unzipped directory
+        if unzip_dir and unzip_dir.exists():
+            await asyncio.get_event_loop().run_in_executor(
+                cpu_executor, shutil.rmtree, unzip_dir
+            )
+        if s3_bucket:
+            parquet_path.unlink(missing_ok=True)
 
 
 def extract_zip(zip_path: Path, output_dir: Path) -> None:
@@ -137,11 +135,13 @@ async def process_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create processing tasks
-    semaphore = asyncio.Semaphore(max_concurrent)
+    io_semaphore = asyncio.Semaphore(max_concurrent)  # I/O-bound concurrency
+    cpu_executor = ThreadPoolExecutor(max_workers=os.cpu_count())  # CPU-bound concurrency
+
     async with aiohttp.ClientSession(headers={"Authorization": api_key}) as session:
         tasks = []
         for file_info in file_queue:
-            await semaphore.acquire()
+            await io_semaphore.acquire()
             task = asyncio.create_task(
                 process_single_file(
                     session=session,
@@ -151,9 +151,10 @@ async def process_pipeline(
                     output_dir=output_dir,
                     locations_filter=locations_filter,
                     s3_bucket=s3_bucket,
+                    cpu_executor=cpu_executor
                 )
             )
-            task.add_done_callback(lambda _: semaphore.release())
+            task.add_done_callback(lambda _: io_semaphore.release())
             tasks.append(task)
 
         await asyncio.gather(*tasks)
