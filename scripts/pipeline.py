@@ -10,6 +10,7 @@ import aiofiles
 import aiohttp
 import aioboto3
 import pandas as pd
+from aiohttp import ClientError
 
 from knmi_fetcher import download_file
 from grib_to_parquet import grib_files_to_dataframe
@@ -19,6 +20,20 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger("pipeline")
+
+SCRIPTS_PATH = Path(__file__).parent
+
+
+async def s3_file_exists(s3_bucket: str, key: str) -> bool:
+    """Check if a file exists in S3 bucket asynchronously"""
+    try:
+        async with aioboto3.Session().client("s3") as s3:
+            await s3.head_object(Bucket=s3_bucket, Key=key)
+            return True
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return False
+        raise
 
 
 async def process_single_file(
@@ -40,6 +55,11 @@ async def process_single_file(
         return
 
     try:
+        # Check if output exists in S3
+        if s3_bucket and await s3_file_exists(s3_bucket, parquet_path.name):
+            logger.info(f"Skipping {file_info['filename']}: {parquet_path.name} exists in S3")
+            return
+
         # 1. Download the file
         zip_path = output_dir / file_info["filename"]
         await download_file(
@@ -108,8 +128,9 @@ async def process_pipeline(
 ) -> None:
     """Main processing pipeline with concurrency control"""
     # Load configuration
-    file_queue = pd.read_json("file_queue.json").to_dict("records")
-    locations_filter = pd.read_csv("selected_locations.csv")["location_idx"].values
+
+    file_queue = pd.read_json(SCRIPTS_PATH / "file_queue.json").to_dict("records")
+    locations_filter = pd.read_csv(SCRIPTS_PATH / "selected_locations.csv")["location_idx"].values
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create processing tasks
