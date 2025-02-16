@@ -10,7 +10,7 @@ import aiofiles
 import aiohttp
 import aioboto3
 import pandas as pd
-from aiohttp import ClientError
+from botocore.exceptions import ClientError
 
 from knmi_fetcher import download_file
 from grib_to_parquet import grib_files_to_dataframe
